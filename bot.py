@@ -152,31 +152,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()        return
-
-    text = message.text.replace(f"@{bot_username}", "").strip()
-    if not text:
-        return
-
-    if any(trigger in text.lower() for trigger in IMAGE_TRIGGERS):
-        await handle_image(update, text)
-    else:
-        await handle_question(update, text)
-
-
-def main() -> None:
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("ask", ask))
-    application.add_handler(CommandHandler("img", img))
-    application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_mention_or_reply)
-    )
-
-    logger.info("Бот запущен, ожидаю сообщения...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-
-if __name__ == "__main__":
     main()
