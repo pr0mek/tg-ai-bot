@@ -1,6 +1,6 @@
 import os
 import logging
-import base64
+import time
 from io import BytesIO
 
 from telegram import Update
@@ -33,6 +33,26 @@ IMAGE_MODEL = "gemini-2.5-flash-image"
 # Ключевые слова для генерации картинок (можно добавить свои)
 IMAGE_TRIGGERS = ["нарисуй", "сгенерируй картинку", "сгенерируй изображение", "draw", "generate image"]
 
+MAX_RETRIES = 3
+RETRY_DELAY_SECONDS = 5
+
+
+def generate_with_retry(model: str, contents: str):
+    """Пытается выполнить запрос к Gemini несколько раз, если сервер перегружен (503)."""
+    last_error = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            return client.models.generate_content(model=model, contents=contents)
+        except Exception as e:
+            last_error = e
+            is_overloaded = "503" in str(e) or "UNAVAILABLE" in str(e)
+            if is_overloaded and attempt < MAX_RETRIES:
+                logger.warning(f"Сервер перегружен, попытка {attempt}/{MAX_RETRIES}, жду {RETRY_DELAY_SECONDS} сек...")
+                time.sleep(RETRY_DELAY_SECONDS)
+                continue
+            raise
+    raise last_error
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
@@ -63,10 +83,7 @@ async def img(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def handle_question(update: Update, question: str) -> None:
     thinking_msg = await update.message.reply_text("Думаю...")
     try:
-        response = client.models.generate_content(
-            model=TEXT_MODEL,
-            contents=question,
-        )
+        response = generate_with_retry(TEXT_MODEL, question)
         answer = response.text or "Не получилось сформулировать ответ, попробуй переформулировать вопрос."
         await thinking_msg.edit_text(answer)
     except Exception as e:
@@ -77,10 +94,7 @@ async def handle_question(update: Update, question: str) -> None:
 async def handle_image(update: Update, prompt: str) -> None:
     thinking_msg = await update.message.reply_text("Рисую...")
     try:
-        response = client.models.generate_content(
-            model=IMAGE_MODEL,
-            contents=prompt,
-        )
+        response = generate_with_retry(IMAGE_MODEL, prompt)
         image_found = False
         for part in response.candidates[0].content.parts:
             if part.inline_data is not None:
@@ -112,6 +126,33 @@ async def handle_mention_or_reply(update: Update, context: ContextTypes.DEFAULT_
 
     if not (is_mentioned or is_reply_to_bot):
         return
+
+    text = message.text.replace(f"@{bot_username}", "").strip()
+    if not text:
+        return
+
+    if any(trigger in text.lower() for trigger in IMAGE_TRIGGERS):
+        await handle_image(update, text)
+    else:
+        await handle_question(update, text)
+
+
+def main() -> None:
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("ask", ask))
+    application.add_handler(CommandHandler("img", img))
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_mention_or_reply)
+    )
+
+    logger.info("Бот запущен, ожидаю сообщения...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()        return
 
     text = message.text.replace(f"@{bot_username}", "").strip()
     if not text:
