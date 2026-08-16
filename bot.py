@@ -27,7 +27,7 @@ GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-TEXT_MODEL = "gemini-flash-latest"
+TEXT_MODEL = "gemini-flash-lite-latest"
 IMAGE_MODEL = "gemini-2.5-flash-image"
 
 SYSTEM_INSTRUCTION = (
