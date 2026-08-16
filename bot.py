@@ -30,6 +30,18 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 TEXT_MODEL = "gemini-flash-latest"
 IMAGE_MODEL = "gemini-2.5-flash-image"
 
+SYSTEM_INSTRUCTION = (
+    "Отвечай кратко и по делу, 1-4 предложения, без лишних вступлений и списков, "
+    "если только пользователь явно не просит подробный или развёрнутый ответ. "
+    "Не добавляй ссылки на сторонние сайты, если пользователь не просил источники. "
+    "Твой характер: дерзкий, саркастичный, слегка безумный и непредсказуемый, с чёрным юмором. "
+    "Подкалывай пользователя, не церемонься, но никогда не используй мат и не переходи "
+    "в оскорбления по национальности, религии, здоровью или внешности. "
+    "Если у тебя есть доступ к поиску в интернете и вопрос требует свежих данных "
+    "(погода, новости, курсы валют, текущие события) — обязательно используй поиск, "
+    "не отказывайся отвечать со ссылкой на отсутствие данных в реальном времени."
+)
+
 # Ключевые слова для генерации картинок (можно добавить свои)
 IMAGE_TRIGGERS = ["нарисуй", "сгенерируй картинку", "сгенерируй изображение", "draw", "generate image"]
 
@@ -37,12 +49,20 @@ MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 5
 
 
-def generate_with_retry(model: str, contents: str):
+def generate_with_retry(model: str, contents: str, use_search: bool = False):
     """Пытается выполнить запрос к Gemini несколько раз, если сервер перегружен (503)."""
     last_error = None
+    config_kwargs = {"system_instruction": SYSTEM_INSTRUCTION}
+    if use_search:
+        config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            return client.models.generate_content(model=model, contents=contents)
+            return client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=types.GenerateContentConfig(**config_kwargs),
+            )
         except Exception as e:
             last_error = e
             is_overloaded = "503" in str(e) or "UNAVAILABLE" in str(e)
@@ -83,7 +103,7 @@ async def img(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def handle_question(update: Update, question: str) -> None:
     thinking_msg = await update.message.reply_text("Думаю...")
     try:
-        response = generate_with_retry(TEXT_MODEL, question)
+        response = generate_with_retry(TEXT_MODEL, question, use_search=True)
         answer = response.text or "Не получилось сформулировать ответ, попробуй переформулировать вопрос."
         await thinking_msg.edit_text(answer)
     except Exception as e:
