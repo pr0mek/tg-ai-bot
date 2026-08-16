@@ -27,7 +27,7 @@ GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-TEXT_MODEL = "gemini-2.5-flash"
+TEXT_MODEL = "gemini-flash-latest"
 IMAGE_MODEL = "gemini-2.5-flash-image"
 
 # Ключевые слова для генерации картинок (можно добавить свои)
