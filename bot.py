@@ -103,7 +103,7 @@ async def img(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def handle_question(update: Update, question: str) -> None:
     thinking_msg = await update.message.reply_text("Думаю...")
     try:
-        response = generate_with_retry(TEXT_MODEL, question, use_search=True)
+        response = generate_with_retry(TEXT_MODEL, question, use_search=False)
         answer = response.text or "Не получилось сформулировать ответ, попробуй переформулировать вопрос."
         await thinking_msg.edit_text(answer)
     except Exception as e:
