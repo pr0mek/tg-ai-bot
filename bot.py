@@ -143,6 +143,28 @@ def generate_image_with_retry(prompt: str):
     raise last_error
 
 
+def analyze_image_with_retry(image_bytes: bytes, question: str):
+    """Отправляет картинку + вопрос в Gemini, с автоповтором при перегрузке (503)."""
+    last_error = None
+    image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            return client.models.generate_content(
+                model=TEXT_MODEL,
+                contents=[image_part, question],
+                config=types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION),
+            )
+        except Exception as e:
+            last_error = e
+            is_overloaded = "503" in str(e) or "UNAVAILABLE" in str(e)
+            if is_overloaded and attempt < MAX_RETRIES:
+                logger.warning(f"Сервер перегружен, попытка {attempt}/{MAX_RETRIES}, жду {RETRY_DELAY_SECONDS} сек...")
+                time.sleep(RETRY_DELAY_SECONDS)
+                continue
+            raise
+    raise last_error
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Привет! Я ИИ-бот.\n\n"
@@ -152,6 +174,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/reset — забыть историю нашей переписки\n"
         "/forget_chat — забыть всё, что происходило в чате\n\n"
         "Также отвечаю, если меня упомянуть (@имя_бота) или ответить на моё сообщение. "
+        "Могу разобрать и присланное фото — просто отправь картинку с подписью "
+        "или упомяни меня в подписи. "
         "Я помню контекст последних сообщений в рамках беседы и слежу за общим чатом, "
         "чтобы отвечать с учётом того, что тут обсуждали."
     )
@@ -249,6 +273,40 @@ async def log_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     add_to_chat_log(chat_id, author, message.text)
 
 
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Отвечает на вопрос по присланной фотографии (с подписью или как ответ боту)."""
+    message = update.message
+    if message is None or not message.photo:
+        return
+
+    bot_username = context.bot.username
+    caption = message.caption or ""
+    is_mentioned = bot_username and f"@{bot_username}" in caption
+    is_reply_to_bot = (
+        message.reply_to_message is not None
+        and message.reply_to_message.from_user is not None
+        and message.reply_to_message.from_user.id == context.bot.id
+    )
+
+    # реагируем на фото только если есть подпись с упоминанием, ответ боту, или прямая подпись без адресата
+    if not (is_mentioned or is_reply_to_bot or caption):
+        return
+
+    question = caption.replace(f"@{bot_username}", "").strip() or "Опиши, что на этом изображении."
+
+    thinking_msg = await message.reply_text("Смотрю...")
+    try:
+        photo_file = await message.photo[-1].get_file()
+        image_bytes = bytes(await photo_file.download_as_bytearray())
+
+        response = analyze_image_with_retry(image_bytes, question)
+        answer = response.text or "Не получилось разобрать, что на изображении."
+        await thinking_msg.edit_text(answer)
+    except Exception as e:
+        logger.exception("Ошибка при анализе изображения")
+        await thinking_msg.edit_text(f"Произошла ошибка при анализе изображения: {e}")
+
+
 async def handle_mention_or_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
     if message is None or message.text is None:
@@ -286,6 +344,7 @@ def main() -> None:
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_mention_or_reply)
     )
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     # логируем вообще все текстовые сообщения (включая те, что уже обработаны выше) —
     # отдельная группа обработчиков, чтобы не блокировать основную логику
     application.add_handler(
