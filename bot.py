@@ -30,16 +30,17 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 TEXT_MODEL = "gemini-flash-lite-latest"
 IMAGE_MODEL = "gemini-2.5-flash-image"
 
-SYSTEM_INSTRUCTION = """ отвечай кратко, на агрессию отвечай агрессией """
+SYSTEM_INSTRUCTION = (
+    "Отвечай кратко и по делу, 1-4 предложения, без лишних вступлений и списков, "
+    "если только пользователь явно не просит подробный или развёрнутый ответ. "
+    "Не добавляй ссылки на сторонние сайты, если пользователь не просил источники. "
+    "Твой характер: дерзкий, саркастичный, слегка безумный и непредсказуемый, с чёрным юмором. "
+    "Подкалывай пользователя, не церемонься, но никогда не используй мат и не переходи "
+    "в оскорбления по национальности, религии, здоровью или внешности."
+)
 
 # Ключевые слова для генерации картинок (можно добавить свои)
 IMAGE_TRIGGERS = ["нарисуй", "сгенерируй картинку", "сгенерируй изображение", "draw", "generate image"]
-
-# Ключевые слова, при которых стоит подключать поиск в интернете (расходует отдельный лимит)
-SEARCH_TRIGGERS = [
-    "погода", "новост", "курс", "сегодня", "сейчас", "актуальн", "последние",
-    "кто выиграл", "результат матча", "цена", "стоимост",
-]
 
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 5
@@ -49,6 +50,12 @@ RETRY_DELAY_SECONDS = 5
 # Обнуляется при перезапуске бота (не сохраняется на диск).
 conversation_history: dict[int, list[dict]] = {}
 MAX_HISTORY_MESSAGES = 10  # сколько последних сообщений (вопрос+ответ) помнить на человека
+
+# Общий лог чата: копит все сообщения (от всех участников) без обращения к нейросети.
+# Формат: {chat_id: ["Имя: текст сообщения", ...]}
+# Обнуляется при перезапуске бота (не сохраняется на диск).
+chat_log: dict[int, list[str]] = {}
+MAX_CHAT_LOG_MESSAGES = 50  # сколько последних сообщений чата хранить
 
 
 def get_history(user_id: int) -> list[dict]:
@@ -63,35 +70,47 @@ def add_to_history(user_id: int, role: str, text: str) -> None:
         conversation_history[user_id] = history[-MAX_HISTORY_MESSAGES * 2:]
 
 
-def build_contents(user_id: int, question: str) -> list[dict]:
-    """Собирает историю переписки + новый вопрос в формате, понятном Gemini."""
-    contents = []
-    for entry in get_history(user_id):
-        contents.append({
-            "role": entry["role"],
-            "parts": [{"text": entry["text"]}],
-        })
-    contents.append({
-        "role": "user",
-        "parts": [{"text": question}],
-    })
-    return contents
+def add_to_chat_log(chat_id: int, author: str, text: str) -> None:
+    log = chat_log.setdefault(chat_id, [])
+    log.append(f"{author}: {text}")
+    if len(log) > MAX_CHAT_LOG_MESSAGES:
+        chat_log[chat_id] = log[-MAX_CHAT_LOG_MESSAGES:]
 
 
-def generate_with_retry(model: str, contents: str, use_search: bool = False):
+def get_chat_log_text(chat_id: int) -> str:
+    log = chat_log.get(chat_id, [])
+    if not log:
+        return ""
+    return "\n".join(log)
+
+
+def generate_with_retry(contents: list[dict]):
     """Пытается выполнить запрос к Gemini несколько раз, если сервер перегружен (503)."""
     last_error = None
-    config_kwargs = {"system_instruction": SYSTEM_INSTRUCTION}
-    if use_search:
-        config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
-
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             return client.models.generate_content(
-                model=model,
+                model=TEXT_MODEL,
                 contents=contents,
-                config=types.GenerateContentConfig(**config_kwargs),
+                config=types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION),
             )
+        except Exception as e:
+            last_error = e
+            is_overloaded = "503" in str(e) or "UNAVAILABLE" in str(e)
+            if is_overloaded and attempt < MAX_RETRIES:
+                logger.warning(f"Сервер перегружен, попытка {attempt}/{MAX_RETRIES}, жду {RETRY_DELAY_SECONDS} сек...")
+                time.sleep(RETRY_DELAY_SECONDS)
+                continue
+            raise
+    raise last_error
+
+
+def generate_image_with_retry(prompt: str):
+    """Генерация картинки через Gemini, с автоповтором при перегрузке (503)."""
+    last_error = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            return client.models.generate_content(model=IMAGE_MODEL, contents=prompt)
         except Exception as e:
             last_error = e
             is_overloaded = "503" in str(e) or "UNAVAILABLE" in str(e)
@@ -109,9 +128,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Команды:\n"
         "/ask <вопрос> — задать вопрос\n"
         "/img <описание> — сгенерировать изображение\n"
-        "/reset — забыть историю нашей переписки\n\n"
+        "/reset — забыть историю нашей переписки\n"
+        "/forget_chat — забыть всё, что происходило в чате\n\n"
         "Также отвечаю, если меня упомянуть (@имя_бота) или ответить на моё сообщение. "
-        "Я помню контекст последних сообщений в рамках беседы."
+        "Я помню контекст последних сообщений в рамках беседы и слежу за общим чатом, "
+        "чтобы отвечать с учётом того, что тут обсуждали."
     )
 
 
@@ -119,6 +140,12 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     conversation_history.pop(user_id, None)
     await update.message.reply_text("Память очищена, начинаем с чистого листа.")
+
+
+async def forget_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    chat_log.pop(chat_id, None)
+    await update.message.reply_text("Забыл всё, что видел в этом чате.")
 
 
 async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -139,11 +166,28 @@ async def img(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def handle_question(update: Update, question: str) -> None:
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
     thinking_msg = await update.message.reply_text("Думаю...")
     try:
-        needs_search = any(trigger in question.lower() for trigger in SEARCH_TRIGGERS)
-        contents = build_contents(user_id, question)
-        response = generate_with_retry(TEXT_MODEL, contents, use_search=needs_search)
+        history = get_history(user_id)
+        contents = []
+
+        # добавляем лог чата как единое сообщение-контекст в начало
+        chat_context = get_chat_log_text(chat_id)
+        if chat_context:
+            contents.append({
+                "role": "user",
+                "parts": [{"text": f"Вот недавние сообщения в чате (для контекста, не отвечай на них напрямую):\n{chat_context}"}],
+            })
+            contents.append({
+                "role": "model",
+                "parts": [{"text": "Понял, учту этот контекст."}],
+            })
+
+        contents += [{"role": e["role"], "parts": [{"text": e["text"]}]} for e in history]
+        contents.append({"role": "user", "parts": [{"text": question}]})
+
+        response = generate_with_retry(contents)
         answer = response.text or "Не получилось сформулировать ответ, попробуй переформулировать вопрос."
         await thinking_msg.edit_text(answer)
         # сохраняем обмен в историю только при успешном ответе
@@ -157,7 +201,7 @@ async def handle_question(update: Update, question: str) -> None:
 async def handle_image(update: Update, prompt: str) -> None:
     thinking_msg = await update.message.reply_text("Рисую...")
     try:
-        response = generate_with_retry(IMAGE_MODEL, prompt)
+        response = generate_image_with_retry(prompt)
         image_found = False
         for part in response.candidates[0].content.parts:
             if part.inline_data is not None:
@@ -172,6 +216,16 @@ async def handle_image(update: Update, prompt: str) -> None:
     except Exception as e:
         logger.exception("Ошибка при обращении к Gemini (картинка)")
         await thinking_msg.edit_text(f"Произошла ошибка при генерации изображения: {e}")
+
+
+async def log_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Молча записывает каждое сообщение в общий лог чата (без обращения к нейросети)."""
+    message = update.message
+    if message is None or message.text is None:
+        return
+    chat_id = update.effective_chat.id
+    author = update.effective_user.first_name or update.effective_user.username or "Аноним"
+    add_to_chat_log(chat_id, author, message.text)
 
 
 async def handle_mention_or_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -207,8 +261,14 @@ def main() -> None:
     application.add_handler(CommandHandler("ask", ask))
     application.add_handler(CommandHandler("img", img))
     application.add_handler(CommandHandler("reset", reset))
+    application.add_handler(CommandHandler("forget_chat", forget_chat))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_mention_or_reply)
+    )
+    # логируем вообще все текстовые сообщения (включая те, что уже обработаны выше) —
+    # отдельная группа обработчиков, чтобы не блокировать основную логику
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, log_message), group=1
     )
 
     logger.info("Бот запущен, ожидаю сообщения...")
