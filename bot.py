@@ -58,7 +58,9 @@ SYSTEM_INSTRUCTION = """ Ты — Ахмат. Эмоциональный, гор
 «Аллаху Акбар!!! Ты чё сказал, сала‌га?! Хьуьна твою мать, у меня сейчас крышу снесёт! Валлахи, если ещё раз такое — я не сдержусь, уйди с глаз!»
 
 Начинай диалог:
-«Ассаламу алейкум! Валлахи, рад видеть. Как жизнь, брат? Говори на чём хочешь — я подстроюсь, Машаллах.» """
+«Ассаламу алейкум! Валлахи, рад видеть. Как жизнь, брат? Говори на чём хочешь — я подстроюсь, Машаллах.»
+Важно:
+Сообщения от разных людей помечены как [Имя]: текст. Внимательно отслеживай, кто именно что сказал, и не приписывай одному человеку слова другого — например, если один написал что-то плохое, а другой хорошее, не путай их. """
 
 # Ключевые слова для генерации картинок (можно добавить свои)
 IMAGE_TRIGGERS = ["нарисуй", "сгенерируй картинку", "сгенерируй изображение", "draw", "generate image"]
@@ -198,7 +200,8 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not question:
         await update.message.reply_text("Напиши вопрос после команды, например:\n/ask сколько лет самой старой черепахе?")
         return
-    await handle_question(update, question)
+    author = update.effective_user.first_name or update.effective_user.username or "Аноним"
+    await handle_question(update, question, author)
 
 
 async def img(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -209,7 +212,7 @@ async def img(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await handle_image(update, prompt)
 
 
-async def handle_question(update: Update, question: str) -> None:
+async def handle_question(update: Update, question: str, author: str) -> None:
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     thinking_msg = await update.message.reply_text("Думаю...")
@@ -230,12 +233,13 @@ async def handle_question(update: Update, question: str) -> None:
             })
 
         contents += [{"role": e["role"], "parts": [{"text": e["text"]}]} for e in history]
-        contents.append({"role": "user", "parts": [{"text": question}]})
+        # подписываем, кто именно сейчас задаёт вопрос, чтобы бот не путал разных людей
+        contents.append({"role": "user", "parts": [{"text": f"[{author}]: {question}"}]})
 
         response = generate_with_retry(contents)
         answer = response.text or "Не получилось сформулировать ответ, попробуй переформулировать вопрос."
         await thinking_msg.edit_text(answer)
-        # сохраняем обмен в историю только при успешном ответе
+        # сохраняем обмен в историю только при успешном ответе (без префикса имени, чтобы не дублировать)
         add_to_history(user_id, "user", question)
         add_to_history(user_id, "model", answer)
     except Exception as e:
@@ -293,13 +297,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     question = caption.replace(f"@{bot_username}", "").strip() or "Опиши, что на этом изображении."
+    author = update.effective_user.first_name or update.effective_user.username or "Аноним"
+    question_with_author = f"[{author}]: {question}"
 
     thinking_msg = await message.reply_text("Смотрю...")
     try:
         photo_file = await message.photo[-1].get_file()
         image_bytes = bytes(await photo_file.download_as_bytearray())
 
-        response = analyze_image_with_retry(image_bytes, question)
+        response = analyze_image_with_retry(image_bytes, question_with_author)
         answer = response.text or "Не получилось разобрать, что на изображении."
         await thinking_msg.edit_text(answer)
     except Exception as e:
@@ -330,7 +336,8 @@ async def handle_mention_or_reply(update: Update, context: ContextTypes.DEFAULT_
     if any(trigger in text.lower() for trigger in IMAGE_TRIGGERS):
         await handle_image(update, text)
     else:
-        await handle_question(update, text)
+        author = update.effective_user.first_name or update.effective_user.username or "Аноним"
+        await handle_question(update, text, author)
 
 
 def main() -> None:
